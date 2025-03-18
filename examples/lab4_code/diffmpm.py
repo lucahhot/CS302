@@ -23,7 +23,7 @@ E = 10
 mu = E
 la = E
 max_steps = 2048
-steps = 2000
+steps = 1500
 gravity = 3.8
 target = [0.8, 0.2]
 
@@ -51,6 +51,8 @@ act_strength = 4
 
 # Number of rectangles (doesn't need to be placed in a field, will be declared globally)
 n_rectangles = 0
+
+
 
 def allocate_fields():
     ti.root.dense(ti.ij, (n_actuators, n_sin_waves)).place(weights)
@@ -204,24 +206,12 @@ def g2p(f: ti.i32):
                 new_C += 4 * weight * g_v.outer_product(dpos) * inv_dx
 
         v[f + 1, p] = new_v
-        # Calculate new position
-        new_pos = x[f, p] + dt * v[f + 1, p]
-        
-        # Coefficient of restitution (bounce factor)
-        # 1.0 = perfect elastic collision, 0.0 = complete stop
-        restitution = 0.5
-        
-        # Handle x-boundary collisions with reflection
-        if new_pos[0] < 3*dx:
-            new_pos[0] = 3*dx
-            v[f + 1, p][0] = -v[f + 1, p][0] * restitution  # Reverse and dampen x velocity
-        elif new_pos[0] > 1.0 - 3*dx:
-            new_pos[0] = 1.0 - 3*dx
-            v[f + 1, p][0] = -v[f + 1, p][0] * restitution
-            
-        # Not touching the behavior in the y direction since it's already set up to bounce off the floor
-        
-        x[f + 1, p] = new_pos
+        x[f + 1, p] = x[f, p] + dt * v[f + 1, p]
+        # # Clamp particle positions to valid range
+        # x[f + 1, p] = ti.Vector([
+        #     ti.min(ti.max(x[f, p][0] + dt * v[f + 1, p][0], 3*dx), 1.0 - 3*dx),
+        #     x[f + 1, p][1]
+        # ])
         C[f + 1, p] = new_C
 
 
@@ -229,19 +219,12 @@ def g2p(f: ti.i32):
 def compute_actuation(t: ti.i32):
     for i in range(n_actuators):
         act = 0.0
-        local_omega = 10
-        amplitude = 1.0
-        phase_offset = 0
-        
-        # Create phase offset based on position
-        # Earlier segments activate first
-        phase_offset = -2 * math.pi * i / n_actuators
-        
+        # Changing omega to a lower value resulting in slower oscillations and more gradual changes in actuation values.
+        local_omega = 20
         for j in ti.static(range(n_sin_waves)):
             
-            act += weights[i, j] * amplitude * ti.sin(local_omega * t * dt +
-                                                      phase_offset + 
-                                                      2 * math.pi / n_sin_waves * j)
+            act += weights[i, j] * ti.sin(local_omega * t * dt +
+                                          2 * math.pi / n_sin_waves * j)
         act += bias[i]
         actuation[t, i] = ti.tanh(act)
 
@@ -338,24 +321,26 @@ class Scene:
     def set_n_rectangles(self, n_legs):
         global n_rectangles
         n_rectangles = n_legs + 1
-        
-    # Resets all scene fields and global variables
-    def reset_scene(self):
-        self.n_particles = 0
-        self.n_solid_particles = 0
-        self.x = []
-        self.actuator_id = []
-        self.particle_type = []
-        self.offset_x = 0
-        self.offset_y = 0
-        
-        clear_grid()
-        clear_particle_grad()
-        clear_actuation_grad()
-        reset_simulation()
-        
-        weights.fill(0)
-        bias.fill(0)
+
+
+# def fish(scene):
+#     scene.add_rect(0.025, 0.025, 0.95, 0.1, -1, ptype=0)
+#     scene.add_rect(0.1, 0.2, 0.15, 0.05, -1)
+#     scene.add_rect(0.1, 0.15, 0.025, 0.05, 0)
+#     scene.add_rect(0.125, 0.15, 0.025, 0.05, 1)
+#     scene.add_rect(0.2, 0.15, 0.025, 0.05, 2)
+#     scene.add_rect(0.225, 0.15, 0.025, 0.05, 3)
+#     scene.set_n_actuators(4)
+
+
+# def robot(scene):
+#     scene.set_offset(0.1, 0.03)
+#     scene.add_rect(0.0, 0.1, 0.3, 0.1, -1)
+#     scene.add_rect(0.0, 0.0, 0.05, 0.1, 0)
+#     scene.add_rect(0.05, 0.0, 0.05, 0.1, 1)
+#     scene.add_rect(0.2, 0.0, 0.05, 0.1, 2)
+#     scene.add_rect(0.25, 0.0, 0.05, 0.1, 3)
+#     scene.set_n_actuators(4)
 
 def generate_actuator_groupings(num_rectangles):
     """Generate different ways to group rectangles with actuator IDs"""
@@ -402,41 +387,10 @@ def initialize_rectangles_with_perm(scene, num_legs, actuator_mapping):
     scene.set_n_actuators(num_legs + 1)
     scene.set_n_rectangles(num_legs + 1)
     scene.finalize()
-    
-def initialize_worm(scene, num_segments):
-    scene.set_offset(0.1, 0.3)
-    
-    # Uniform dimensions for all segments
-    segment_length = 0.1
-    segment_height = 0.02  # Same height for all segments
-    
-    # Create connected segments
-    for i in range(num_segments):
-        x_pos = i * segment_length  # Remove spacing, segments touch each other
-        
-        # All segments are same height, just different actuation
-        scene.add_rect(x_pos, 0.0, segment_length, segment_height, i)
-        
-    scene.set_n_actuators(num_segments)
-    scene.set_n_rectangles(num_segments)
-    scene.finalize()
-    
-def initialize_crawler(scene, num_legs):
-    scene.set_offset(0.1, 0.2)
-    
-    # Add body rectangle
-    scene.add_rect(0.0, 0.075, 0.1*num_legs - 0.05, 0.075, -1)
-    
-    # Loop to add leg rectangles
-    for i in range(num_legs):
-        scene.add_rect(0.1*i, 0.0, 0.025, 0.075, 0)
-        scene.add_rect(0.1*i + 0.025, 0.0, 0.025, 0.075, 1)
-    
-    scene.set_n_actuators(2)
-    scene.set_n_rectangles(num_legs+1)
-    scene.finalize()
+    # allocate_fields()
 
 gui = ti.GUI("Differentiable MPM", (640, 640), background_color=0xFFFFFF)
+
 
 def visualize(s, folder):
     aid = actuator_id.to_numpy()
@@ -469,53 +423,118 @@ def main():
     
     parser = argparse.ArgumentParser()
     parser.add_argument('--iters', type=int, default=100)
+    # Add in input parameter for number of legs
     parser.add_argument('--num_legs', type=int, default=4)
     options = parser.parse_args()
     
-    # num_rectangles = options.num_legs + 1
-    num_rectangles = options.num_legs
+    # Generate all possible actuator ID permutations
+    num_rectangles = options.num_legs + 1  # +1 for body
+    all_groupings = generate_actuator_groupings(num_rectangles)
+    
+    best_loss = float('inf')
+    best_permutation = None
+    best_weights = None
+    best_bias = None
+    
+    # Print example of different groupings
+    print("Testing the following actuator ID groupings:")
+    for group in all_groupings:
+        print(f"Grouping: {group} (uses {len(set(group))} unique actuators)")
     
     # Allocate fields
     scene = Scene()
-    scene.set_n_actuators(num_rectangles) 
+    scene.set_n_actuators(num_rectangles) # The max number of actuators is the number of rectangles
     scene.set_n_rectangles(num_rectangles)
     allocate_fields()
+    
+    group_losses = []
+    
+    # Loop through all the groupings of actuator IDs
+    for grouping in all_groupings:
+        print(f"\nTesting actuator ID grouping: {grouping}")
+        print(f"Number of unique actuators: {len(set(grouping))}")
         
-    initialize_worm(scene, num_rectangles)
-    # initialize_crawler(scene, options.num_legs)
+        # Reset scene and fields for new permutation
+        scene = Scene()
         
-    # Initialize weights
+        # clear_particle_grad()
+        # clear_actuation_grad()
+        # reset_simulation()
+
+        # Initialize with current grouping
+        initialize_rectangles_with_perm(scene, options.num_legs, grouping)
+        
+        # Initialize weights and positions
+        for i in range(n_actuators):
+            for j in range(n_sin_waves):
+                weights[i, j] = 0.01
+            bias[i] = 0.01
+        
+        for i in range(scene.n_particles):
+            x[0, i] = scene.x[i]
+            F[0, i] = [[1, 0], [0, 1]]
+            actuator_id[i] = scene.actuator_id[i]
+            particle_type[i] = scene.particle_type[i]
+        
+        # Training loop for current permutation
+        losses = []
+        for iter in range(options.iters):
+            # # Visualize the first iteration before optimization
+            # if iter == 0:
+            #     forward(steps)
+            #     print("Visualizing initial result before any optimizations...")
+            #     for s in range(15, steps, 16):
+            #         visualize(s, 'diffmpm/iter{:03d}/'.format(iter))
+            with ti.ad.Tape(loss):
+                forward(steps)
+            l = loss[None]
+            losses.append(l)
+            print(f'Permutation {grouping}, iter={iter}, loss={l}')
+            
+            learning_rate = 0.1
+            for i in range(n_actuators):
+                for j in range(n_sin_waves):
+                    weights[i, j] -= learning_rate * weights.grad[i, j]
+                bias[i] -= learning_rate * bias.grad[i]
+        
+        # Store best configuration
+        final_loss = losses[-1]
+        group_losses.append(final_loss)
+        if final_loss < best_loss:
+            best_loss = final_loss
+            best_permutation = grouping
+            # Store best weights and biases
+            best_weights = weights.to_numpy().copy()
+            best_bias = bias.to_numpy().copy()
+            
+    # Final visualization with best configuration
+    print(f"\nBest actuator ID permutation: {best_permutation}")
+    print(f"Best loss achieved: {best_loss}")
+    
+    # Print out all the losses of each permutation
+    print("\nLosses for each permutation:")
+    for i, group_loss in enumerate(group_losses):
+        print(f"Permutation {all_groupings[i]}: {group_loss}")
+    
+    # Reinitialize with best configuration
+    scene = Scene()
+    initialize_rectangles_with_perm(scene, options.num_legs, best_permutation)
+    
+    # Set the best weights and biases
     for i in range(n_actuators):
         for j in range(n_sin_waves):
-            weights[i, j] = 0.01
-        bias[i] = 0.0
-    
-    # Setting global variables to corresponding values from scene after adding rectangles
+            weights[i, j] = best_weights[i, j]
+        bias[i] = best_bias[i]
+        
     for i in range(scene.n_particles):
         x[0, i] = scene.x[i]
         F[0, i] = [[1, 0], [0, 1]]
         actuator_id[i] = scene.actuator_id[i]
         particle_type[i] = scene.particle_type[i]
-        
-    # Training loop for current permutation
-    losses = []
-    for iter in range(options.iters):
-                        
-        with ti.ad.Tape(loss):
-            forward(steps)
-        l = loss[None]
-        losses.append(l)
-        print(f'iter={iter}, loss={l}')
-        
-        learning_rate = 0.1
-        for i in range(n_actuators):
-            for j in range(n_sin_waves):
-                weights[i, j] -= learning_rate * weights.grad[i, j]
-            bias[i] -= learning_rate * bias.grad[i]
             
     # Visualize best result
     forward(steps)
-    print("Visualizing final resuls...")
+    print("Visualizing best configuration...")
     for s in range(15, steps, 16):
         visualize(s, 'diffmpm/best_configuration/')
 
